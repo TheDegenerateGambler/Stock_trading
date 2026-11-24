@@ -25,7 +25,7 @@ and options data is public and, for options, typically ~15 minutes delayed.
 ## Secrets
 
 No API keys are committed. Where a tool uses Alpha Vantage, the key must come
-from the `AV_API_KEY` environment variable (or a local, git-ignored `.env`).
+from the `AV_API_KEY` environment variable.
 
 ## License
 
