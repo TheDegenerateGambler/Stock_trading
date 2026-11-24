@@ -1,0 +1,34 @@
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International
+(CC BY-NC-SA 4.0)
+
+Copyright (c) 2026 The Degenerate Gambler
+
+This work (the Pine Script indicators in this repository, including
+"Liquidity Momentum Confluence" / LMC) is licensed under the Creative Commons
+Attribution-NonCommercial-ShareAlike 4.0 International License.
+
+You are free to:
+  - Share  — copy and redistribute the material in any medium or format.
+  - Adapt  — remix, transform, and build upon the material.
+
+Under the following terms:
+  - Attribution  — You must give appropriate credit, provide a link to the
+    license, and indicate if changes were made.
+  - NonCommercial — You may not use the material for commercial purposes.
+  - ShareAlike   — If you remix, transform, or build upon the material, you
+    must distribute your contributions under the same license as the original.
+
+No additional restrictions — You may not apply legal terms or technological
+measures that legally restrict others from doing anything the license permits.
+
+Full legal text:
+  https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+Human-readable summary:
+  https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+NOTE ON ORIGINS: The LMC indicator is a rewrite that draws on prior work
+(LuxAlgo Liquidity Swings and Elder's Bull-Bear Power). This CC BY-NC-SA 4.0
+license is chosen to respect the non-commercial, share-alike spirit of those
+origins. If you reuse this code, preserve attribution and keep derivatives
+under the same terms.

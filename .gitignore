@@ -1,0 +1,23 @@
+# ── Secrets ────────────────────────────────────────────────
+.env
+.env.*
+*.key
+
+# ── Personal data ──────────────────────────────────────────
+# wheel_scanner: the user's own holdings (never commit)
+my_positions.json
+
+# ── Python ─────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# ── Generated / runtime output ─────────────────────────────
+output/
+*.log
+
+# ── OS / editor cruft ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/

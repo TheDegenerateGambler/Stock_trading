@@ -1,0 +1,312 @@
+// =====================================================================
+// CCI Custom Signals+ (Full Overhaul)
+// Version: 2.0
+// Pine Script v6
+//
+// Features:
+//   - CCI oscillator with optional smoothing (SMA/EMA/RMA/WMA/VWMA + BB)
+//   - Multi-timeframe (MTF) support
+//   - Signal modes: Zero Cross / Re-Enter +/-100 / MA Cross / MA Confirmed Zero Cross
+//   - Extreme-zone lookback filter (was oversold/overbought within N bars)
+//   - Slope filter, price-trend EMA filter, signal cooldown / anti-whipsaw
+//   - Regular & Hidden bullish/bearish divergence detection
+//   - Dynamic CCI coloring, BB fill, extreme-zone background
+//   - Grouped inputs, alerts with dynamic messages
+// =====================================================================
+//@version=6
+indicator("CCI Custom Signals+", shorttitle="CCI+", overlay=false, precision=2, max_labels_count=500, max_lines_count=500)
+
+// =====================================================================
+// INPUTS
+// =====================================================================
+grpCCI = "CCI Settings"
+cciLength   = input.int(20, "CCI Length", minval=1, group=grpCCI)
+src         = input.source(hlc3, "Source", group=grpCCI)
+upperLevel  = input.int(100, "Upper Level", group=grpCCI)
+lowerLevel  = input.int(-100, "Lower Level", group=grpCCI)
+htf         = input.timeframe("", "CCI Timeframe (blank = chart)", group=grpCCI)
+
+grpMA = "Smoothing"
+maType      = input.string("EMA", "Smoothing Type", options=["None", "SMA", "EMA", "RMA", "WMA", "VWMA", "SMA + Bollinger Bands"], group=grpMA)
+maLength    = input.int(14, "Smoothing Length", minval=1, group=grpMA)
+bbMult      = input.float(2.0, "CCI BB StdDev", minval=0.1, step=0.1, group=grpMA)
+
+grpSig = "Signal Logic"
+signalMode  = input.string("MA Confirmed Zero Cross", "Signal Mode", options=["Zero Cross", "Re-Enter +/-100", "MA Cross", "MA Confirmed Zero Cross"], group=grpSig)
+useSlopeFilter  = input.bool(false, "Use CCI Slope Filter", group=grpSig)
+useBandFilter   = input.bool(false, "Require Prior Extreme (+/-100)", group=grpSig)
+extremeLookback = input.int(10, "Extreme Lookback (bars)", minval=1, group=grpSig)
+useTrend        = input.bool(false, "Use Price Trend Filter (EMA)", group=grpSig)
+trendLen        = input.int(200, "Trend EMA Length", minval=1, group=grpSig)
+useCooldown     = input.bool(true, "Use Signal Cooldown", group=grpSig)
+minBars         = input.int(3, "Min Bars Between Signals", minval=0, group=grpSig)
+alternateOnly   = input.bool(true, "No Back-to-Back Same-Side Signals", group=grpSig)
+
+grpDiv = "Divergence"
+showDiv        = input.bool(true, "Show Divergences", group=grpDiv)
+useRegDiv      = input.bool(true, "Detect Regular Divergences", group=grpDiv)
+useHidDiv      = input.bool(false, "Detect Hidden Divergences", group=grpDiv)
+divLBLeft      = input.int(5, "Pivot Lookback Left", minval=1, group=grpDiv)
+divLBRight     = input.int(5, "Pivot Lookback Right", minval=1, group=grpDiv)
+divRangeMin    = input.int(5, "Min Bars Between Pivots", minval=1, group=grpDiv)
+divRangeMax    = input.int(60, "Max Bars Between Pivots", minval=5, group=grpDiv)
+useDivAsSignal = input.bool(false, "Trigger Buy/Sell on Divergences", group=grpDiv)
+
+grpVis = "Visuals"
+showMA      = input.bool(true, "Show Smoothing Line", group=grpVis)
+showBB      = input.bool(true, "Show CCI Bollinger Bands", group=grpVis)
+showBBFill  = input.bool(true, "Fill CCI Bollinger Bands", group=grpVis)
+showSignals = input.bool(true, "Show Buy/Sell Markers", group=grpVis)
+showLabels  = input.bool(false, "Show Buy/Sell Labels", group=grpVis)
+showBg      = input.bool(true, "Highlight Extreme Zones (Background)", group=grpVis)
+dynColor    = input.bool(true, "Dynamic CCI Color by Zone", group=grpVis)
+
+grpColors = "Colors"
+cciColor     = input.color(#2962FF, "CCI Color", group=grpColors)
+maColor      = input.color(color.yellow, "MA Color", group=grpColors)
+bbColor      = input.color(color.green, "BB Color", group=grpColors)
+buyColor     = input.color(color.lime, "Buy Color", group=grpColors)
+sellColor    = input.color(color.red, "Sell Color", group=grpColors)
+bullDivColor = input.color(color.lime, "Bullish Divergence", group=grpColors)
+bearDivColor = input.color(color.red, "Bearish Divergence", group=grpColors)
+
+// =====================================================================
+// HELPERS
+// =====================================================================
+f_ma(_src, _len, _type) =>
+    switch _type
+        "SMA"                   => ta.sma(_src, _len)
+        "EMA"                   => ta.ema(_src, _len)
+        "RMA"                   => ta.rma(_src, _len)
+        "WMA"                   => ta.wma(_src, _len)
+        "VWMA"                  => ta.vwma(_src, _len)
+        "SMA + Bollinger Bands" => ta.sma(_src, _len)
+        => na
+
+// =====================================================================
+// CCI (MTF-aware)
+// =====================================================================
+f_calc() =>
+    _cci = ta.cci(src, cciLength)
+    _lo  = low
+    _hi  = high
+    [_cci, _lo, _hi]
+
+[cci, htfLow, htfHigh] = request.security(syminfo.tickerid, htf == "" ? timeframe.period : htf, f_calc(), lookahead=barmerge.lookahead_off)
+
+// =====================================================================
+// Smoothing / BB
+// =====================================================================
+enableMA = maType != "None"
+isBBMode = maType == "SMA + Bollinger Bands"
+
+cciMA    = enableMA ? f_ma(cci, maLength, maType) : na
+cciStdev = isBBMode ? ta.stdev(cci, maLength) * bbMult : na
+cciBBUp  = isBBMode ? cciMA + cciStdev : na
+cciBBDn  = isBBMode ? cciMA - cciStdev : na
+
+// =====================================================================
+// Trend / extreme-zone helpers
+// =====================================================================
+trendEma = ta.ema(close, trendLen)
+trendUp  = close > trendEma
+trendDn  = close < trendEma
+
+wasOversold   = ta.barssince(cci <= lowerLevel) <= extremeLookback
+wasOverbought = ta.barssince(cci >= upperLevel) <= extremeLookback
+
+// =====================================================================
+// Base signals per mode
+// =====================================================================
+zeroBuy   = ta.crossover(cci, 0)
+zeroSell  = ta.crossunder(cci, 0)
+
+reBuy     = ta.crossover(cci, lowerLevel)
+reSell    = ta.crossunder(cci, upperLevel)
+
+maCrossBuy  = enableMA and ta.crossover(cci, cciMA)
+maCrossSell = enableMA and ta.crossunder(cci, cciMA)
+
+maConfBuy  = ta.crossover(cci, 0)  and (not enableMA or cci > cciMA)
+maConfSell = ta.crossunder(cci, 0) and (not enableMA or cci < cciMA)
+
+baseBuy = switch signalMode
+    "Zero Cross"              => zeroBuy
+    "Re-Enter +/-100"         => reBuy
+    "MA Cross"                => maCrossBuy
+    "MA Confirmed Zero Cross" => maConfBuy
+    => false
+
+baseSell = switch signalMode
+    "Zero Cross"              => zeroSell
+    "Re-Enter +/-100"         => reSell
+    "MA Cross"                => maCrossSell
+    "MA Confirmed Zero Cross" => maConfSell
+    => false
+
+// =====================================================================
+// Filters
+// =====================================================================
+slopeBuy  = not useSlopeFilter or cci > cci[1]
+slopeSell = not useSlopeFilter or cci < cci[1]
+
+bandBuy   = not useBandFilter or wasOversold
+bandSell  = not useBandFilter or wasOverbought
+
+trendBuy  = not useTrend or trendUp
+trendSell = not useTrend or trendDn
+
+rawBuy  = baseBuy  and slopeBuy  and bandBuy  and trendBuy
+rawSell = baseSell and slopeSell and bandSell and trendSell
+
+// =====================================================================
+// Divergence detection
+// =====================================================================
+pivotHigh = ta.pivothigh(cci, divLBLeft, divLBRight)
+pivotLow  = ta.pivotlow(cci,  divLBLeft, divLBRight)
+
+// Track last two pivots (value + bar_index of the pivot bar)
+var float lastPHVal = na
+var int   lastPHBar = na
+var float prevPHVal = na
+var int   prevPHBar = na
+
+var float lastPLVal = na
+var int   lastPLBar = na
+var float prevPLVal = na
+var int   prevPLBar = na
+
+// Also track price at those pivots (using htfHigh/htfLow so MTF-safe)
+var float lastPHPrice = na
+var float prevPHPrice = na
+var float lastPLPrice = na
+var float prevPLPrice = na
+
+if not na(pivotHigh)
+    prevPHVal   := lastPHVal
+    prevPHBar   := lastPHBar
+    prevPHPrice := lastPHPrice
+    lastPHVal   := pivotHigh
+    lastPHBar   := bar_index - divLBRight
+    lastPHPrice := htfHigh[divLBRight]
+
+if not na(pivotLow)
+    prevPLVal   := lastPLVal
+    prevPLBar   := lastPLBar
+    prevPLPrice := lastPLPrice
+    lastPLVal   := pivotLow
+    lastPLBar   := bar_index - divLBRight
+    lastPLPrice := htfLow[divLBRight]
+
+bullRegDiv = false
+bullHidDiv = false
+bearRegDiv = false
+bearHidDiv = false
+
+// Bullish (at pivot lows): compare on the bar the new pivot is confirmed
+if not na(pivotLow) and not na(prevPLVal)
+    barsBetween = lastPLBar - prevPLBar
+    if barsBetween >= divRangeMin and barsBetween <= divRangeMax
+        // Regular Bullish: price LL, CCI HL
+        if useRegDiv and lastPLPrice < prevPLPrice and lastPLVal > prevPLVal
+            bullRegDiv := true
+        // Hidden Bullish: price HL, CCI LL
+        if useHidDiv and lastPLPrice > prevPLPrice and lastPLVal < prevPLVal
+            bullHidDiv := true
+
+// Bearish (at pivot highs)
+if not na(pivotHigh) and not na(prevPHVal)
+    barsBetweenH = lastPHBar - prevPHBar
+    if barsBetweenH >= divRangeMin and barsBetweenH <= divRangeMax
+        // Regular Bearish: price HH, CCI LH
+        if useRegDiv and lastPHPrice > prevPHPrice and lastPHVal < prevPHVal
+            bearRegDiv := true
+        // Hidden Bearish: price LH, CCI HH
+        if useHidDiv and lastPHPrice < prevPHPrice and lastPHVal > prevPHVal
+            bearHidDiv := true
+
+anyBullDiv = bullRegDiv or bullHidDiv
+anyBearDiv = bearRegDiv or bearHidDiv
+
+// =====================================================================
+// Cooldown / alternation
+// =====================================================================
+var int lastSignalBar = na
+var int lastSignalDir = 0  // 1=buy, -1=sell
+
+// Optionally add divergence as a signal source
+divBuy  = useDivAsSignal and anyBullDiv
+divSell = useDivAsSignal and anyBearDiv
+
+candidateBuy  = rawBuy  or divBuy
+candidateSell = rawSell or divSell
+
+canBuy  = (not useCooldown or na(lastSignalBar) or (bar_index - lastSignalBar >= minBars)) and (not alternateOnly or lastSignalDir != 1)
+canSell = (not useCooldown or na(lastSignalBar) or (bar_index - lastSignalBar >= minBars)) and (not alternateOnly or lastSignalDir != -1)
+
+buySignal  = candidateBuy  and canBuy
+sellSignal = candidateSell and canSell and not buySignal  // avoid same-bar both
+
+if buySignal
+    lastSignalBar := bar_index
+    lastSignalDir := 1
+if sellSignal
+    lastSignalBar := bar_index
+    lastSignalDir := -1
+
+// =====================================================================
+// Plots
+// =====================================================================
+cciDynColor = dynColor ? (cci > upperLevel ? sellColor : cci < lowerLevel ? buyColor : cciColor) : cciColor
+plot(cci, title="CCI", color=cciDynColor, linewidth=2)
+plot(showMA and enableMA ? cciMA : na, title="CCI MA", color=maColor, linewidth=2)
+
+pBBU = plot(showBB and isBBMode ? cciBBUp : na, title="CCI BB Upper", color=bbColor)
+pBBL = plot(showBB and isBBMode ? cciBBDn : na, title="CCI BB Lower", color=bbColor)
+fill(pBBU, pBBL, color=showBBFill and isBBMode ? color.new(bbColor, 90) : na)
+
+hline(upperLevel, "Upper Band",  color=color.gray, linestyle=hline.style_dashed)
+hline(0,          "Middle Band", color=color.new(color.gray, 50))
+hline(lowerLevel, "Lower Band",  color=color.gray, linestyle=hline.style_dashed)
+
+bgcolor(showBg and cci > upperLevel ? color.new(sellColor, 92) : showBg and cci < lowerLevel ? color.new(buyColor, 92) : na)
+
+// =====================================================================
+// Signal markers
+// =====================================================================
+plotshape(showSignals and buySignal,  title="Buy",  style=shape.triangleup,   location=location.bottom, color=buyColor,  size=size.small)
+plotshape(showSignals and sellSignal, title="Sell", style=shape.triangledown, location=location.top,    color=sellColor, size=size.small)
+
+if showLabels and buySignal
+    label.new(bar_index, cci, "BUY",  style=label.style_label_up,   color=buyColor,  textcolor=color.white, size=size.small)
+if showLabels and sellSignal
+    label.new(bar_index, cci, "SELL", style=label.style_label_down, color=sellColor, textcolor=color.white, size=size.small)
+
+// =====================================================================
+// Divergence drawing (lines on CCI pane between prior and current pivots)
+// =====================================================================
+f_drawDiv(_isBull, _isRegular, _prevBar, _prevVal, _curBar, _curVal) =>
+    col   = _isBull ? bullDivColor : bearDivColor
+    style = _isRegular ? line.style_solid : line.style_dashed
+    txt   = (_isBull ? "Bull " : "Bear ") + (_isRegular ? "Div" : "Hid Div")
+    line.new(_prevBar, _prevVal, _curBar, _curVal, xloc=xloc.bar_index, color=col, style=style, width=2)
+    label.new(_curBar, _curVal, txt, xloc=xloc.bar_index, style=_isBull ? label.style_label_up : label.style_label_down, color=col, textcolor=color.white, size=size.tiny)
+
+if showDiv and bullRegDiv
+    f_drawDiv(true,  true,  prevPLBar, prevPLVal, lastPLBar, lastPLVal)
+if showDiv and bullHidDiv
+    f_drawDiv(true,  false, prevPLBar, prevPLVal, lastPLBar, lastPLVal)
+if showDiv and bearRegDiv
+    f_drawDiv(false, true,  prevPHBar, prevPHVal, lastPHBar, lastPHVal)
+if showDiv and bearHidDiv
+    f_drawDiv(false, false, prevPHBar, prevPHVal, lastPHBar, lastPHVal)
+
+// =====================================================================
+// Alerts
+// =====================================================================
+alertcondition(buySignal,   title="CCI Buy Signal",  message="CCI+ BUY on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(sellSignal,  title="CCI Sell Signal", message="CCI+ SELL on {{ticker}} ({{interval}}) @ {{close}}")
+alertcondition(bullRegDiv,  title="Bullish Regular Divergence", message="CCI+ Bullish Regular Divergence on {{ticker}} ({{interval}})")
+alertcondition(bearRegDiv,  title="Bearish Regular Divergence", message="CCI+ Bearish Regular Divergence on {{ticker}} ({{interval}})")
+alertcondition(bullHidDiv,  title="Bullish Hidden Divergence",  message="CCI+ Bullish Hidden Divergence on {{ticker}} ({{interval}})")
+alertcondition(bearHidDiv,  title="Bearish Hidden Divergence",  message="CCI+ Bearish Hidden Divergence on {{ticker}} ({{interval}})")

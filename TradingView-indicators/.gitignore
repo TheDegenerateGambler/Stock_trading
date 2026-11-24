@@ -1,0 +1,6 @@
+# ── OS / editor cruft ──────────────────────────────────────
+.DS_Store
+Thumbs.db
+.vscode/
+
+# (Pine Script source files are the deliverable and ARE committed.)

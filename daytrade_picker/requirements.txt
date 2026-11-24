@@ -1,0 +1,5 @@
+# DayTrade Picker dependencies
+yfinance>=0.2.40
+requests>=2.31.0
+pandas>=2.0.0
+feedparser>=6.0.0

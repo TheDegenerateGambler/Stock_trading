@@ -1,0 +1,502 @@
+// This work is licensed under CC BY-NC-SA 4.0
+// Based on LuxAlgo Liquidity Swings + Elder's Bull Bear Power + Bollinger Bands
+// Rewritten with adaptive tuning, confluence signals, and live dashboard.
+
+//@version=5
+indicator("Liquidity + Momentum Confluence", shorttitle="LMC", overlay=true, max_lines_count=500, max_labels_count=500, max_boxes_count=500)
+
+// === INPUTS: TUNING ===
+grpTune="🤖 Auto-Tuning"
+tuningMode = input.string("Auto (Recommended)","Tuning Mode",options=["Auto (Recommended)","Manual","Preset: SPY/QQQ 5m","Preset: SPY/QQQ 15m","Preset: SPY/QQQ 1h","Preset: SPY/QQQ 4h","Preset: SPY/QQQ Daily"],group=grpTune,tooltip="AUTO: self-adjusts. MANUAL: use values below. PRESETS: SPY/QQQ tuned.")
+
+// === INPUTS: LIQUIDITY ===
+grpLiq="🌊 Liquidity Swings"
+inLength=input.int(14,"Pivot Lookback",minval=2,group=grpLiq)
+area=input.string("Wick Extremity","Swing Area",options=["Wick Extremity","Full Range"],group=grpLiq)
+filterOptions=input.string("Count","Filter Zones By",options=["Count","Volume"],inline="f",group=grpLiq)
+filterValue=input.float(0,"",inline="f",group=grpLiq)
+showTop=input.bool(true,"Swing Highs",group=grpLiq)
+showBtm=input.bool(true,"Swing Lows",group=grpLiq)
+
+// === INPUTS: BB ===
+grpBB="📉 Bollinger Bands"
+showBB=input.bool(true,"Show BB",group=grpBB)
+inBBLength=input.int(20,"BB Length",minval=2,group=grpBB)
+inBBMult=input.float(2.0,"BB Multiplier",minval=0.1,step=0.1,group=grpBB)
+bbFillOn=input.bool(true,"Fill Between Bands",group=grpBB)
+bbFillTransp=input.int(92,"Fill Transparency",minval=0,maxval=100,group=grpBB)
+
+// === INPUTS: BBP ===
+grpBBP="⚡ BBP Momentum"
+inBBPLength=input.int(13,"BBP EMA Length",minval=2,group=grpBBP)
+showBullSignals=input.bool(true,"Show Bulls",group=grpBBP)
+showBearSignals=input.bool(true,"Show Bears",group=grpBBP)
+signalVisual=input.string("Arrow","Signal Visual",options=["Arrow","Label","Both"],group=grpBBP)
+inCooldown=input.int(5,"Cooldown (bars)",minval=0,group=grpBBP)
+useBBFilter=input.bool(false,"BB OS/OB Filter",group=grpBBP)
+inBBLookback=input.int(5,"BB Filter Lookback",minval=1,group=grpBBP)
+useATRFilter=input.bool(false,"ATR Min Filter",group=grpBBP)
+inATRMultFilter=input.float(0.3,"ATR Filter Mult",minval=0.05,step=0.05,group=grpBBP)
+
+// === INPUTS: TREND ===
+grpTrend="📈 Trend Filter"
+useTrendFilter=input.bool(false,"Enable Trend Filter",group=grpTrend)
+inTrendLen=input.int(50,"Trend EMA Length",minval=5,group=grpTrend)
+showTrend=input.bool(true,"Plot Trend EMA",group=grpTrend)
+
+// === INPUTS: CONFLUENCE ===
+grpConf="⭐ Confluence"
+useConfluence=input.bool(true,"Enable ★ Signals",group=grpConf)
+inSweepLookback=input.int(10,"Sweep Lookback",minval=1,group=grpConf)
+
+// === INPUTS: DASHBOARD ===
+grpDash="📋 Dashboard"
+showDash=input.bool(true,"Show Dashboard",group=grpDash)
+dashPos=input.string("Top Right","Position",options=["Top Right","Top Left","Bottom Right","Bottom Left","Middle Right"],group=grpDash)
+dashSize=input.string("Small","Size",options=["Tiny","Small","Normal","Large"],group=grpDash)
+
+// === INPUTS: STYLE ===
+grpStyle="🎨 Style"
+topCss=input.color(color.red,"Swing High Line",group=grpStyle)
+topAreaCss=input.color(color.new(color.red,75),"Swing High Zone",group=grpStyle)
+btmCss=input.color(color.teal,"Swing Low Line",group=grpStyle)
+btmAreaCss=input.color(color.new(color.teal,75),"Swing Low Zone",group=grpStyle)
+bbColor=input.color(color.orange,"BB Color",group=grpStyle)
+bullSignalColor=input.color(#089981,"Bull Signal",group=grpStyle)
+bearSignalColor=input.color(#f23645,"Bear Signal",group=grpStyle)
+confBullColor=input.color(#00e5b0,"★ Bull",group=grpStyle)
+confBearColor=input.color(#ff2a6d,"★ Bear",group=grpStyle)
+trendUpColor=input.color(color.new(#089981,40),"Trend Up",group=grpStyle)
+trendDnColor=input.color(color.new(#f23645,40),"Trend Down",group=grpStyle)
+labelSize=input.string("Tiny","Zone Label Size",options=["Tiny","Small","Normal","Large"],group=grpStyle)
+
+// === INPUTS: MARKET INTERNALS ===
+grpInt="🌐 Market Internals"
+enableInternals = input.bool(true, "Enable Market Internals", group=grpInt, tooltip="Fetch VIX/TICK/TRIN/breadth/DXY/sector data and show status lights. US equities only.")
+symVix       = input.symbol("TVC:VIX",         "VIX (Fear)",         group=grpInt)
+symTickNy    = input.symbol("USI:TICK.NY",     "TICK NYSE",          group=grpInt, tooltip="NYSE TICK - order-flow extremes on NYSE. Use for SPY.")
+symTickNq    = input.symbol("USI:TICK.NQ",     "TICK NASDAQ",        group=grpInt, tooltip="NASDAQ TICK - use for QQQ.")
+symBreadthNy = input.symbol("USI:ADVDEC.NY",   "Breadth NYSE",       group=grpInt, tooltip="NYSE Adv-Dec. Best for SPY.")
+symBreadthNq = input.symbol("USI:ADVDEC.NQ",   "Breadth NASDAQ",     group=grpInt, tooltip="NASDAQ Adv-Dec. Best for QQQ.")
+symTrinNy    = input.symbol("USI:TRIN.NY",     "TRIN NYSE",          group=grpInt, tooltip="NYSE Arms Index. LOW = buying pressure, HIGH = selling pressure (inverted vs TICK). Best for SPY.")
+symTrinNq    = input.symbol("USI:TRIN.NQ",     "TRIN NASDAQ",        group=grpInt, tooltip="NASDAQ Arms Index. Best for QQQ.")
+symDxy       = input.symbol("TVC:DXY",         "DXY (Dollar)",       group=grpInt)
+symRiskOn    = input.symbol("AMEX:XLY",        "Risk-On ETF",        group=grpInt)
+symRiskOff   = input.symbol("AMEX:XLP",        "Risk-Off ETF",       group=grpInt)
+vixGreen     = input.float(15, "VIX Green Below", group=grpInt, inline="vix")
+vixRed       = input.float(22, "Red Above",       group=grpInt, inline="vix")
+tickGreen    = input.float(500,  "TICK Green Above", group=grpInt, inline="tick")
+tickRed      = input.float(-500, "Red Below",        group=grpInt, inline="tick")
+breadthGreen = input.float(500,  "Breadth Green Above", group=grpInt, inline="br")
+breadthRed   = input.float(-500, "Red Below",           group=grpInt, inline="br")
+trinGreen    = input.float(0.8,  "TRIN Green Below",    group=grpInt, inline="tr", tooltip="Inverted: LOW TRIN = bullish (buying volume dominates).")
+trinRed      = input.float(1.2,  "Red Above",           group=grpInt, inline="tr")
+vixSpikeLvl  = input.float(25, "VIX Spike Alert Level", group=grpInt)
+tickExtremeLvl = input.float(1000, "TICK Extreme Alert Level (± this)", group=grpInt)
+trinPanicSell = input.float(2.0, "TRIN Panic SELL Above", group=grpInt, tooltip="Extreme selling / possible capitulation bottom.")
+trinPanicBuy  = input.float(0.5, "TRIN Panic BUY Below",  group=grpInt, tooltip="Extreme buying / possible euphoric top.")
+
+sizeFromString(s)=>s=="Tiny"?size.tiny:s=="Small"?size.small:s=="Normal"?size.normal:size.large
+fmtSigned(x) => (x >= 0 ? "+" : "") + str.tostring(x, "#.##")
+
+// === AUTO-TUNE ===
+tfSec=timeframe.in_seconds(timeframe.period)
+atrRaw=ta.atr(14)
+volPct=nz(atrRaw/close*100.0)
+tfBucket=tfSec<=300?"Scalp":tfSec<=900?"Intraday":tfSec<=3600?"Swing":tfSec<=14400?"Position":"Daily+"
+volBucket=volPct<0.2?"Low":volPct<0.6?"Med":"High"
+autoPivot=math.max(5,int(math.round(14*math.pow(math.max(tfSec,60)/900.0,0.3)/(1+volPct/2.0))))
+autoCooldown=math.max(2,int(math.round(8-math.min(tfSec,14400)/1800.0)))
+autoSweepLB=math.max(3,int(math.round(20/math.sqrt(math.max(tfSec,60)/300.0))))
+autoBBmult=volBucket=="High"?2.5:volBucket=="Low"?1.8:2.0
+autoTrendLen=tfSec<=3600?50:100
+autoBBLB=math.max(3,int(math.round(5*math.sqrt(math.max(tfSec,60)/900.0))))
+
+resolvePreset(mode) =>
+    switch mode
+        "Preset: SPY/QQQ 5m"    => [10, 13, 20, 2.0, 8, 15,  50, 6]
+        "Preset: SPY/QQQ 15m"   => [14, 13, 20, 2.0, 6, 10,  50, 5]
+        "Preset: SPY/QQQ 1h"    => [14, 13, 20, 2.0, 5,  8,  50, 4]
+        "Preset: SPY/QQQ 4h"    => [10, 13, 20, 2.0, 4,  6,  50, 3]
+        "Preset: SPY/QQQ Daily" => [ 8, 13, 20, 2.0, 3,  5, 100, 3]
+        =>                         [inLength, inBBPLength, inBBLength, inBBMult, inCooldown, inSweepLookback, inTrendLen, inBBLookback]
+
+[preLen, preBBPLen, preBBLen, preBBMult, preCd, preSweep, preTrendLen, preBBLB] = resolvePreset(tuningMode)
+
+isAuto=tuningMode=="Auto (Recommended)"
+isPreset=str.startswith(tuningMode,"Preset:")
+length=isAuto?autoPivot:preLen
+bbpLength=isAuto?13:preBBPLen
+bbLength=isAuto?20:preBBLen
+bbMult=isAuto?autoBBmult:preBBMult
+cooldown=isAuto?autoCooldown:preCd
+sweepLB=isAuto?autoSweepLB:preSweep
+trendLen=isAuto?autoTrendLen:preTrendLen
+bbLookback=isAuto?autoBBLB:preBBLB
+modeLabel=isAuto?"🤖 AUTO":isPreset?"📦 "+str.replace(tuningMode,"Preset: ",""):"🛠 MANUAL"
+
+// === BOLLINGER BANDS ===
+bbBasis=ta.sma(close,bbLength)
+bbDev=bbMult*ta.stdev(close,bbLength)
+bbUpper=bbBasis+bbDev
+bbLower=bbBasis-bbDev
+bbWidth=(bbUpper-bbLower)/bbBasis*100.0
+pctB=(close-bbLower)/(bbUpper-bbLower)
+pBasis=plot(showBB?bbBasis:na,"BB Basis",color=color.new(color.gray,40))
+pUpper=plot(showBB?bbUpper:na,"BB Upper",color=bbColor)
+pLower=plot(showBB?bbLower:na,"BB Lower",color=bbColor)
+fill(pUpper,pLower,color=showBB and bbFillOn?color.new(bbColor,bbFillTransp):na)
+
+// === TREND EMA ===
+trendEMA=ta.ema(close,trendLen)
+isBullTrend=close>trendEMA
+plot(showTrend?trendEMA:na,"Trend EMA",color=isBullTrend?trendUpColor:trendDnColor,linewidth=2)
+
+// === MARKET INTERNALS ===
+// State: 0=na/gray, 1=green, 2=yellow, 3=red
+f_getClose(sym) => request.security(sym, timeframe.period, close, ignore_invalid_symbol=true)
+f_getPrev(sym)  => request.security(sym, "D", close[1], ignore_invalid_symbol=true)
+
+vixVal        = enableInternals ? f_getClose(symVix)        : na
+tickNyVal     = enableInternals ? f_getClose(symTickNy)     : na
+tickNqVal     = enableInternals ? f_getClose(symTickNq)     : na
+breadthNyVal  = enableInternals ? f_getClose(symBreadthNy)  : na
+breadthNqVal  = enableInternals ? f_getClose(symBreadthNq)  : na
+trinNyVal     = enableInternals ? f_getClose(symTrinNy)     : na
+trinNqVal     = enableInternals ? f_getClose(symTrinNq)     : na
+dxyVal        = enableInternals ? f_getClose(symDxy)        : na
+dxyPrev       = enableInternals ? f_getPrev(symDxy)         : na
+riskOnVal     = enableInternals ? f_getClose(symRiskOn)     : na
+riskOffVal    = enableInternals ? f_getClose(symRiskOff)    : na
+riskOnPrev    = enableInternals ? f_getPrev(symRiskOn)      : na
+riskOffPrev   = enableInternals ? f_getPrev(symRiskOff)     : na
+
+// Classify: return state 1=green, 2=yellow, 3=red, 0=na
+classVix       = na(vixVal)       ? 0 : vixVal       < vixGreen     ? 1 : vixVal       > vixRed     ? 3 : 2
+classTickNy    = na(tickNyVal)    ? 0 : tickNyVal    > tickGreen    ? 1 : tickNyVal    < tickRed    ? 3 : 2
+classTickNq    = na(tickNqVal)    ? 0 : tickNqVal    > tickGreen    ? 1 : tickNqVal    < tickRed    ? 3 : 2
+classBreadthNy = na(breadthNyVal) ? 0 : breadthNyVal > breadthGreen ? 1 : breadthNyVal < breadthRed ? 3 : 2
+classBreadthNq = na(breadthNqVal) ? 0 : breadthNqVal > breadthGreen ? 1 : breadthNqVal < breadthRed ? 3 : 2
+// TRIN is inverted: LOW = bullish (buying volume), HIGH = bearish (selling volume)
+classTrinNy    = na(trinNyVal)    ? 0 : trinNyVal    < trinGreen    ? 1 : trinNyVal    > trinRed    ? 3 : 2
+classTrinNq    = na(trinNqVal)    ? 0 : trinNqVal    < trinGreen    ? 1 : trinNqVal    > trinRed    ? 3 : 2
+
+// DXY: falling = green (risk-on), rising = red
+dxyChgPct = not na(dxyVal) and not na(dxyPrev) and dxyPrev != 0 ? (dxyVal - dxyPrev) / dxyPrev * 100.0 : na
+classDxy = na(dxyChgPct) ? 0 : dxyChgPct < -0.1 ? 1 : dxyChgPct > 0.1 ? 3 : 2
+
+// Sectors: XLY/XLP ratio rising = green (risk-on)
+sectorRatio     = not na(riskOnVal)  and not na(riskOffVal)  and riskOffVal  != 0 ? riskOnVal  / riskOffVal  : na
+sectorRatioPrev = not na(riskOnPrev) and not na(riskOffPrev) and riskOffPrev != 0 ? riskOnPrev / riskOffPrev : na
+sectorChgPct = not na(sectorRatio) and not na(sectorRatioPrev) and sectorRatioPrev != 0 ? (sectorRatio - sectorRatioPrev) / sectorRatioPrev * 100.0 : na
+classSector = na(sectorChgPct) ? 0 : sectorChgPct > 0.1 ? 1 : sectorChgPct < -0.1 ? 3 : 2
+
+// Composite BIAS (9 lights: VIX, TICK NY, TICK NQ, Breadth NY, Breadth NQ, TRIN NY, TRIN NQ, DXY, Sectors)
+greenCount = (classVix==1?1:0) + (classTickNy==1?1:0) + (classTickNq==1?1:0) + (classBreadthNy==1?1:0) + (classBreadthNq==1?1:0) + (classTrinNy==1?1:0) + (classTrinNq==1?1:0) + (classDxy==1?1:0) + (classSector==1?1:0)
+redCount   = (classVix==3?1:0) + (classTickNy==3?1:0) + (classTickNq==3?1:0) + (classBreadthNy==3?1:0) + (classBreadthNq==3?1:0) + (classTrinNy==3?1:0) + (classTrinNq==3?1:0) + (classDxy==3?1:0) + (classSector==3?1:0)
+naCount    = (classVix==0?1:0) + (classTickNy==0?1:0) + (classTickNq==0?1:0) + (classBreadthNy==0?1:0) + (classBreadthNq==0?1:0) + (classTrinNy==0?1:0) + (classTrinNq==0?1:0) + (classDxy==0?1:0) + (classSector==0?1:0)
+validCount = 9 - naCount
+
+biasScore = greenCount - redCount  // range -9..+9
+biasTxt = validCount == 0 ? "N/A" : biasScore >= 5 ? "STRONG BULL" : biasScore >= 2 ? "BULLISH" : biasScore <= -5 ? "STRONG BEAR" : biasScore <= -2 ? "BEARISH" : "NEUTRAL"
+biasColor = biasScore >= 5 ? confBullColor : biasScore >= 2 ? bullSignalColor : biasScore <= -5 ? confBearColor : biasScore <= -2 ? bearSignalColor : color.gray
+biasEmoji = biasScore >= 2 ? "🟢" : biasScore <= -2 ? "🔴" : "🟡"
+
+// State → emoji helper for the individual rows
+lightEmoji(state) => state == 1 ? "🟢" : state == 2 ? "🟡" : state == 3 ? "🔴" : "⚪"
+lightColor(state) => state == 1 ? bullSignalColor : state == 2 ? color.yellow : state == 3 ? bearSignalColor : color.gray
+
+// === PIVOT / ZONE ENGINE (unified) ===
+n = bar_index
+
+getCount(cond, top, btm) =>
+    var int count = 0
+    var float vol = 0.0
+    if cond
+        count := 0
+        vol   := 0.0
+    else
+        inZone = low[length] < top and high[length] > btm
+        vol   += inZone ? nz(volume[length]) : 0
+        count += inZone ? 1 : 0
+    [count, vol]
+
+// Process one side (isHigh=true for swing highs, false for lows)
+processSide(isHigh, pivotHit, showSide, lineCss, areaCss) =>
+    var float zoneTop  = na
+    var float zoneBtm  = na
+    var bool  crossed  = false
+    var int   x1       = 0
+    var line  lvl      = na
+    var box   zone     = na
+    var label lbl      = na
+    var float lastSweepBar = na  // bar_index where last swept
+
+    [cnt, vol] = getCount(pivotHit, zoneTop, zoneBtm)
+    target = filterOptions == "Count" ? float(cnt) : vol
+
+    if pivotHit and showSide
+        if isHigh
+            zoneTop := high[length]
+            zoneBtm := area == "Wick Extremity" ? math.max(close[length], open[length]) : low[length]
+        else
+            zoneTop := area == "Wick Extremity" ? math.min(close[length], open[length]) : high[length]
+            zoneBtm := low[length]
+        x1      := n - length
+        crossed := false
+
+    // Cross detection
+    if not na(zoneTop) and not na(zoneBtm)
+        justCrossed = isHigh ? (close > zoneTop and not crossed) : (close < zoneBtm and not crossed)
+        if justCrossed
+            crossed := true
+            lastSweepBar := bar_index
+
+    // Draw / update zone
+    if pivotHit and showSide and target >= filterValue
+        zone := box.new(x1, zoneTop, x1 + 3, zoneBtm, border_color=na, bgcolor=areaCss)
+        lvl  := line.new(x1, isHigh ? zoneTop : zoneBtm, x1 + 3, isHigh ? zoneTop : zoneBtm, color=lineCss, width=1)
+        txt  = filterOptions == "Volume" ? str.tostring(vol, format.volume) : str.tostring(cnt)
+        lbl  := label.new(x1, isHigh ? zoneTop : zoneBtm, txt, style=isHigh ? label.style_label_down : label.style_label_up, color=#00000000, textcolor=lineCss, size=sizeFromString(labelSize))
+
+    // Extend active zone
+    if not crossed and not na(zone)
+        box.set_right(zone, n + 3)
+        line.set_x2(lvl, n + 3)
+    else if crossed and not na(zone)
+        box.set_right(zone, math.max(box.get_right(zone), int(nz(lastSweepBar, n))))
+        line.set_x2(lvl, int(nz(lastSweepBar, n)))
+        line.set_style(lvl, line.style_dashed)
+
+    [zoneTop, zoneBtm, crossed, lastSweepBar]
+
+ph = ta.pivothigh(length, length)
+pl = ta.pivotlow(length, length)
+
+[phTop, phBtm, phCrossed, phSweepBar] = processSide(true,  ph, showTop, topCss, topAreaCss)
+[plTop, plBtm, plCrossed, plSweepBar] = processSide(false, pl, showBtm, btmCss, btmAreaCss)
+
+// === BBP ===
+emaBBP    = ta.ema(close, bbpLength)
+bullPower = high - emaBBP
+bearPower = low  - emaBBP
+bbp       = bullPower + bearPower
+
+bbpBullCross = ta.crossover(bbp, 0)
+bbpBearCross = ta.crossunder(bbp, 0)
+
+// Filters
+bbBullOK = not useBBFilter or (ta.lowest(close, bbLookback) <= ta.lowest(bbLower, bbLookback) or close < bbLower)
+bbBearOK = not useBBFilter or (ta.highest(close, bbLookback) >= ta.highest(bbUpper, bbLookback) or close > bbUpper)
+atrOK    = not useATRFilter or (high - low) >= (atrRaw * inATRMultFilter)
+trendBullOK = not useTrendFilter or isBullTrend
+trendBearOK = not useTrendFilter or not isBullTrend
+
+// Cooldown
+var int lastBullBar = -10000
+var int lastBearBar = -10000
+
+rawBull = bbpBullCross and bbBullOK and atrOK and trendBullOK
+rawBear = bbpBearCross and bbBearOK and atrOK and trendBearOK
+
+bullSignal = rawBull and (bar_index - lastBullBar) >= cooldown
+bearSignal = rawBear and (bar_index - lastBearBar) >= cooldown
+
+if bullSignal
+    lastBullBar := bar_index
+if bearSignal
+    lastBearBar := bar_index
+
+// === CONFLUENCE ===
+recentBullSweep = not na(plSweepBar) and (bar_index - plSweepBar) <= sweepLB
+recentBearSweep = not na(phSweepBar) and (bar_index - phSweepBar) <= sweepLB
+inLowerBB       = close < bbBasis
+inUpperBB       = close > bbBasis
+
+confBull = useConfluence and bullSignal and recentBullSweep and inLowerBB
+confBear = useConfluence and bearSignal and recentBearSweep and inUpperBB
+
+// === PLOTS: SIGNALS ===
+showArrow = signalVisual == "Arrow" or signalVisual == "Both"
+showLabel = signalVisual == "Label" or signalVisual == "Both"
+
+plotshape(showArrow and showBullSignals and bullSignal and not confBull, "Bull", shape.triangleup,   location.belowbar, bullSignalColor, size=size.small)
+plotshape(showArrow and showBearSignals and bearSignal and not confBear, "Bear", shape.triangledown, location.abovebar, bearSignalColor, size=size.small)
+
+if showLabel and showBullSignals and bullSignal and not confBull
+    label.new(bar_index, low,  "BUY",  style=label.style_label_up,   color=bullSignalColor, textcolor=color.white, size=size.small)
+if showLabel and showBearSignals and bearSignal and not confBear
+    label.new(bar_index, high, "SELL", style=label.style_label_down, color=bearSignalColor, textcolor=color.white, size=size.small)
+
+// Confluence signals (always shown, more prominent)
+plotshape(confBull, "★ Bull", shape.triangleup,   location.belowbar, confBullColor, size=size.normal, text="★")
+plotshape(confBear, "★ Bear", shape.triangledown, location.abovebar, confBearColor, size=size.normal, text="★")
+
+if confBull
+    label.new(bar_index, low,  "★ BUY",  style=label.style_label_up,   color=confBullColor, textcolor=color.white, size=size.normal)
+if confBear
+    label.new(bar_index, high, "★ SELL", style=label.style_label_down, color=confBearColor, textcolor=color.white, size=size.normal)
+
+// === DASHBOARD ===
+posMap(p) =>
+    switch p
+        "Top Right"    => position.top_right
+        "Top Left"     => position.top_left
+        "Bottom Right" => position.bottom_right
+        "Bottom Left"  => position.bottom_left
+        =>                position.middle_right
+
+var table dash = na
+if showDash and barstate.islast
+    dash := table.new(posMap(dashPos), 2, 22, border_width=1, frame_color=color.new(color.gray, 60), frame_width=1)
+    txtSz = sizeFromString(dashSize)
+    hdrBg = color.new(color.black, 30)
+    rowBg = color.new(color.black, 70)
+
+    table.cell(dash, 0, 0, syminfo.ticker + " • " + timeframe.period, bgcolor=hdrBg, text_color=color.white, text_size=txtSz)
+    table.cell(dash, 1, 0, modeLabel, bgcolor=hdrBg, text_color=color.yellow, text_size=txtSz)
+
+    table.cell(dash, 0, 1, "TF/Vol",   bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 1, tfBucket + " • " + volBucket + " (" + str.tostring(volPct, "#.##") + "%)", bgcolor=rowBg, text_color=color.white, text_size=txtSz)
+
+    trendTxt = isBullTrend ? "🟢 BULL" : "🔴 BEAR"
+    table.cell(dash, 0, 2, "Trend",    bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 2, trendTxt,   bgcolor=rowBg, text_color=isBullTrend ? confBullColor : confBearColor, text_size=txtSz)
+
+    bbpTxt = str.tostring(bbp, "#.##") + (bbp > 0 ? " ▲" : " ▼")
+    table.cell(dash, 0, 3, "BBP",      bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 3, bbpTxt,     bgcolor=rowBg, text_color=bbp > 0 ? bullSignalColor : bearSignalColor, text_size=txtSz)
+
+    pctBTxt = str.tostring(pctB, "#.##")
+    table.cell(dash, 0, 4, "%B",       bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 4, pctBTxt,    bgcolor=rowBg, text_color=color.white, text_size=txtSz)
+
+    widthTxt = str.tostring(bbWidth, "#.##") + "%"
+    table.cell(dash, 0, 5, "BB Width", bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 5, widthTxt,   bgcolor=rowBg, text_color=color.white, text_size=txtSz)
+
+    hiDist = not na(phTop) ? (phTop - close) / close * 100.0 : na
+    loDist = not na(plBtm) ? (plBtm - close) / close * 100.0 : na
+    hiTxt = not na(phTop) ? str.tostring(phTop, format.mintick) + "  (" + fmtSigned(hiDist) + "%)" : "—"
+    loTxt = not na(plBtm) ? str.tostring(plBtm, format.mintick) + "  (" + fmtSigned(loDist) + "%)" : "—"
+
+    table.cell(dash, 0, 6, "Near Hi",  bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 6, hiTxt,      bgcolor=rowBg, text_color=topCss, text_size=txtSz)
+
+    table.cell(dash, 0, 7, "Near Lo",  bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 7, loTxt,      bgcolor=rowBg, text_color=btmCss, text_size=txtSz)
+
+    // Last signal tracking
+    var string lastSigTxt = "—"
+    var int    lastSigBar = na
+    if confBull
+        lastSigTxt := "★ BUY"
+        lastSigBar := bar_index
+    else if confBear
+        lastSigTxt := "★ SELL"
+        lastSigBar := bar_index
+    else if bullSignal
+        lastSigTxt := "BUY"
+        lastSigBar := bar_index
+    else if bearSignal
+        lastSigTxt := "SELL"
+        lastSigBar := bar_index
+    sigAgo = not na(lastSigBar) ? " (" + str.tostring(bar_index - lastSigBar) + " bars ago)" : ""
+    isConf = str.contains(lastSigTxt, "★")
+    isBull = str.contains(lastSigTxt, "BUY")
+    sigColor = isConf and isBull ? confBullColor : isConf ? confBearColor : isBull ? bullSignalColor : lastSigTxt == "SELL" ? bearSignalColor : color.gray
+
+    table.cell(dash, 0, 8, "Last Sig", bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 8, lastSigTxt + sigAgo, bgcolor=rowBg, text_color=sigColor, text_size=txtSz)
+
+    // Effective parameters row
+    paramTxt = "piv=" + str.tostring(length) + " cd=" + str.tostring(cooldown) + " sw=" + str.tostring(sweepLB)
+    table.cell(dash, 0, 9, "Params",   bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+    table.cell(dash, 1, 9, paramTxt,   bgcolor=rowBg, text_color=color.new(color.white, 30), text_size=txtSz)
+
+    // === Market Internals Section ===
+    if enableInternals
+        table.cell(dash, 0, 10, "🌐 Internals", bgcolor=hdrBg, text_color=color.white, text_size=txtSz)
+        table.cell(dash, 1, 10, validCount > 0 ? str.tostring(validCount) + "/9 live" : "no data", bgcolor=hdrBg, text_color=color.silver, text_size=txtSz)
+
+        vixTxt        = na(vixVal)        ? "—" : lightEmoji(classVix)        + "  " + str.tostring(vixVal,        "#.##")
+        tickNyTxt     = na(tickNyVal)     ? "—" : lightEmoji(classTickNy)     + "  " + str.tostring(tickNyVal,     "#")
+        tickNqTxt     = na(tickNqVal)     ? "—" : lightEmoji(classTickNq)     + "  " + str.tostring(tickNqVal,     "#")
+        breadthNyTxt  = na(breadthNyVal)  ? "—" : lightEmoji(classBreadthNy)  + "  " + str.tostring(breadthNyVal,  "#")
+        breadthNqTxt  = na(breadthNqVal)  ? "—" : lightEmoji(classBreadthNq)  + "  " + str.tostring(breadthNqVal,  "#")
+        trinNyTxt     = na(trinNyVal)     ? "—" : lightEmoji(classTrinNy)     + "  " + str.tostring(trinNyVal,     "#.##")
+        trinNqTxt     = na(trinNqVal)     ? "—" : lightEmoji(classTrinNq)     + "  " + str.tostring(trinNqVal,     "#.##")
+        dxyTxt        = na(dxyChgPct)     ? "—" : lightEmoji(classDxy)        + "  " + fmtSigned(dxyChgPct)        + "%"
+        sectTxt       = na(sectorChgPct)  ? "—" : lightEmoji(classSector)     + "  XLY/XLP " + fmtSigned(sectorChgPct) + "%"
+
+        // Grouped by exchange: NY block, then NQ block
+        table.cell(dash, 0, 11, "VIX",        bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 11, vixTxt,       bgcolor=rowBg, text_color=lightColor(classVix), text_size=txtSz)
+
+        table.cell(dash, 0, 12, "TICK NY",    bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 12, tickNyTxt,    bgcolor=rowBg, text_color=lightColor(classTickNy), text_size=txtSz)
+
+        table.cell(dash, 0, 13, "TRIN NY",    bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 13, trinNyTxt,    bgcolor=rowBg, text_color=lightColor(classTrinNy), text_size=txtSz)
+
+        table.cell(dash, 0, 14, "Breadth NY", bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 14, breadthNyTxt, bgcolor=rowBg, text_color=lightColor(classBreadthNy), text_size=txtSz)
+
+        table.cell(dash, 0, 15, "TICK NQ",    bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 15, tickNqTxt,    bgcolor=rowBg, text_color=lightColor(classTickNq), text_size=txtSz)
+
+        table.cell(dash, 0, 16, "TRIN NQ",    bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 16, trinNqTxt,    bgcolor=rowBg, text_color=lightColor(classTrinNq), text_size=txtSz)
+
+        table.cell(dash, 0, 17, "Breadth NQ", bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 17, breadthNqTxt, bgcolor=rowBg, text_color=lightColor(classBreadthNq), text_size=txtSz)
+
+        table.cell(dash, 0, 18, "DXY",        bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 18, dxyTxt,       bgcolor=rowBg, text_color=lightColor(classDxy), text_size=txtSz)
+
+        table.cell(dash, 0, 19, "Sectors",    bgcolor=rowBg, text_color=color.silver, text_size=txtSz)
+        table.cell(dash, 1, 19, sectTxt,      bgcolor=rowBg, text_color=lightColor(classSector), text_size=txtSz)
+
+        // Composite BIAS
+        biasRowTxt = biasEmoji + "  " + biasTxt + "  (" + str.tostring(greenCount) + "G/" + str.tostring(redCount) + "R)"
+        table.cell(dash, 0, 20, "BIAS",       bgcolor=hdrBg, text_color=color.white, text_size=txtSz)
+        table.cell(dash, 1, 20, biasRowTxt,   bgcolor=hdrBg, text_color=biasColor, text_size=txtSz)
+
+// === ALERTS ===
+sweepUp = ta.crossover(close, phTop) and not na(phTop)
+sweepDn = ta.crossunder(close, plBtm) and not na(plBtm)
+
+// Market internals alerts
+vixSpike       = enableInternals and not na(vixVal) and ta.crossover(vixVal, vixSpikeLvl)
+tickExtremeNy  = enableInternals and not na(tickNyVal) and (ta.crossover(tickNyVal, tickExtremeLvl) or ta.crossunder(tickNyVal, -tickExtremeLvl))
+tickExtremeNq  = enableInternals and not na(tickNqVal) and (ta.crossover(tickNqVal, tickExtremeLvl) or ta.crossunder(tickNqVal, -tickExtremeLvl))
+tickExtreme    = tickExtremeNy or tickExtremeNq
+
+// TRIN panic - fires on transition into panic territory (crossover/crossunder, not sustained condition)
+trinPanicSellNy = enableInternals and not na(trinNyVal) and ta.crossover(trinNyVal, trinPanicSell)
+trinPanicSellNq = enableInternals and not na(trinNqVal) and ta.crossover(trinNqVal, trinPanicSell)
+trinPanicBuyNy  = enableInternals and not na(trinNyVal) and ta.crossunder(trinNyVal, trinPanicBuy)
+trinPanicBuyNq  = enableInternals and not na(trinNqVal) and ta.crossunder(trinNqVal, trinPanicBuy)
+trinPanicSellAlert = trinPanicSellNy or trinPanicSellNq
+trinPanicBuyAlert  = trinPanicBuyNy  or trinPanicBuyNq
+
+// Bias flip detection (bullish score to bearish score or vice versa)
+var int prevBiasSign = 0
+curBiasSign = biasScore >= 2 ? 1 : biasScore <= -2 ? -1 : 0
+biasFlipBull = enableInternals and prevBiasSign <= 0 and curBiasSign == 1
+biasFlipBear = enableInternals and prevBiasSign >= 0 and curBiasSign == -1
+if curBiasSign != 0
+    prevBiasSign := curBiasSign
+
+alertcondition(bullSignal,   "Bullish BBP Signal",         "LMC: Bullish BBP on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(bearSignal,   "Bearish BBP Signal",         "LMC: Bearish BBP on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(confBull,     "★ Bullish Confluence",       "LMC: ★ STRONG BUY on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(confBear,     "★ Bearish Confluence",       "LMC: ★ STRONG SELL on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(sweepUp,      "Swing High Swept",           "LMC: Swing high swept on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(sweepDn,      "Swing Low Swept",            "LMC: Swing low swept on {{ticker}} {{interval}} @ {{close}}")
+alertcondition(vixSpike,           "🚨 VIX Spike",               "LMC: VIX spike - market fear rising on {{ticker}}")
+alertcondition(tickExtreme,        "🚨 TICK Extreme",            "LMC: TICK extreme reading - potential climax on {{ticker}}")
+alertcondition(trinPanicSellAlert, "🚨 TRIN Panic Selling",      "LMC: TRIN panic SELL - possible capitulation bottom on {{ticker}}")
+alertcondition(trinPanicBuyAlert,  "🚨 TRIN Panic Buying",       "LMC: TRIN panic BUY - possible euphoric top on {{ticker}}")
+alertcondition(biasFlipBull,       "🔄 BIAS Flip → Bullish",     "LMC: Market bias flipped BULLISH on {{ticker}}")
+alertcondition(biasFlipBear,       "🔄 BIAS Flip → Bearish",     "LMC: Market bias flipped BEARISH on {{ticker}}")
